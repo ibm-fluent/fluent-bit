@@ -101,6 +101,10 @@ tags [here](https://docs.fluentbit.io/manual/installation/docker).
 
 Fluent Bit is fully supported on Windows environments, get started with [these instructions](https://docs.fluentbit.io/manual/installation/windows).
 
+#### Running on s390x
+
+Fluent Bit is supported on Linux on IBM Z (s390x) environment without WASM, because building WAMR is not supported as of today on s390x and LuaJIT as well.
+
 ### Plugins: Inputs, Filters and Outputs
 
 [Fluent Bit](http://fluentbit.io) is based in a pluggable architecture where different plugins plays a major role in the data pipeline:
