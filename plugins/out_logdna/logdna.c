@@ -61,6 +61,8 @@ static int record_append_primary_keys(struct flb_logdna *ctx,
     msgpack_object *file = NULL;
     msgpack_object *app = NULL;
     msgpack_object *meta = NULL;
+    msgpack_object *label = NULL;
+    msgpack_object *annotation = NULL;
     msgpack_object k;
     msgpack_object v;
 
@@ -105,6 +107,24 @@ static int record_append_primary_keys(struct flb_logdna *ctx,
             msgpack_pack_object(mp_sbuf, v);
             c++;
         }
+
+         /* Label */
+        if (!label && primary_key_check(k, "label", 5) == FLB_TRUE) {
+            label = &k;
+            msgpack_pack_str(mp_sbuf, 5);
+            msgpack_pack_str_body(mp_sbuf, "label", 5);
+            msgpack_pack_object(mp_sbuf, v);
+            c++;
+        }
+
+        /* Annotation */
+        if (!annotation && primary_key_check(k, "annotation", 10) == FLB_TRUE) {
+            annotation = &k;
+            msgpack_pack_str(mp_sbuf, 10);
+            msgpack_pack_str_body(mp_sbuf, "annotation", 10);
+            msgpack_pack_object(mp_sbuf, v);
+            c++;
+        }
     }
 
     /* Set the global file name if the record did not provided one */
@@ -117,8 +137,11 @@ static int record_append_primary_keys(struct flb_logdna *ctx,
     }
 
 
-    /* If no application name is set, set the default */
-    if (!app) {
+    /*
+     * If there is no application name set, and also no Kubernetes label
+     * from which an application name can be derived, then set the default application.
+     */
+    if (!app && !label) {
         msgpack_pack_str(mp_sbuf, 3);
         msgpack_pack_str_body(mp_sbuf, "app", 3);
         msgpack_pack_str(mp_sbuf, flb_sds_len(ctx->app));
@@ -127,6 +150,36 @@ static int record_append_primary_keys(struct flb_logdna *ctx,
     }
 
     return c;
+}
+
+/*
+ * Returns true if the configuration contains key and it is found
+ * in the event, otherwise returns false
+ */
+static bool retrieve_log_entry_for_key(struct flb_logdna *ctx,
+                           msgpack_object *map,
+                           msgpack_packer *mp_sbuf)
+{
+    if (!ctx->key) {
+        return false;
+    }
+
+    int i;
+
+    msgpack_object k;
+    msgpack_object v;
+
+    for (i = 0; i < map->via.array.size; i++) {
+        k = map->via.map.ptr[i].key;
+        v = map->via.map.ptr[i].val;
+
+        if (primary_key_check(k, ctx->key, flb_sds_len(ctx->key)) == FLB_TRUE) {
+            msgpack_pack_object(mp_sbuf, v);
+            return true;
+        }
+    }
+
+    return false;
 }
 
 static flb_sds_t logdna_compose_payload(struct flb_logdna *ctx,
@@ -192,11 +245,13 @@ static flb_sds_t logdna_compose_payload(struct flb_logdna *ctx,
         msgpack_pack_str(&mp_pck, 4);
         msgpack_pack_str_body(&mp_pck, "line", 4);
 
-        line_json = flb_msgpack_to_json_str(1024, log_event.body);
-        len = strlen(line_json);
-        msgpack_pack_str(&mp_pck, len);
-        msgpack_pack_str_body(&mp_pck, line_json, len);
-        flb_free(line_json);
+        if (!retrieve_log_entry_for_key(ctx, log_event.body, &mp_pck)) {
+            line_json = flb_msgpack_to_json_str(1024, log_event.body);
+            len = strlen(line_json);
+            msgpack_pack_str(&mp_pck, len);
+            msgpack_pack_str_body(&mp_pck, line_json, len);
+            flb_free(line_json);
+        }
 
         /* Adjust map header size */
         flb_mp_set_map_header_size(mp_sbuf.data + map_off, array_size);
@@ -434,8 +489,11 @@ static void cb_logdna_flush(struct flb_event_chunk *event_chunk,
     /* Set callback context to the HTTP client context */
     flb_http_set_callback_context(c, ctx->ins->callback);
 
-    /* User Agent */
-    flb_http_add_header(c, "User-Agent", 10, "Fluent-Bit", 10);
+    /* User Agent
+     * Set value to "logdna-agent/1.0.0 Fluent-Bit" to mimic the native logdna-agent format,
+     * enhancing parsing compatibility with LogDNA.
+     */
+    flb_http_add_header(c, "User-Agent", 10, "logdna-agent/1.0.0 Fluent-Bit", 29);
 
     /* Add Content-Type header */
     flb_http_add_header(c,
@@ -572,6 +630,16 @@ static struct flb_config_map config_map[] = {
      FLB_CONFIG_MAP_STR, "app", "Fluent Bit",
      0, FLB_TRUE, offsetof(struct flb_logdna, app),
      "Name of the application generating the data (optional)"
+    },
+
+    {
+     FLB_CONFIG_MAP_STR, "key", NULL,
+     0, FLB_TRUE, offsetof(struct flb_logdna, key),
+     "Initially, the entire log record is transmitted to LogDNA. "
+     "By specifying a key using this option, only that key's value "
+     "will be transmitted to LogDNA. For instance, if you are using "
+     "the Tail input plugin, you can specify `key log` and only "
+     "the log message will be transmitted to LogDNA."
     },
 
     /* EOF */
